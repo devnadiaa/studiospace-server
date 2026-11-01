@@ -153,6 +153,73 @@ async function run() {
       }
     });
 
+    app.patch("/bookings/:id/cancel", async (req, res) => {
+      try {
+        const id = req.params.id;
+        const { customerEmail } = req.body;
+
+        if (!ObjectId.isValid(id)) {
+          return res.status(400).send({
+            message: "Invalid Booking ID",
+          });
+        }
+
+        if (
+          typeof customerEmail !== "string" ||
+          customerEmail.trim() === ""
+        ) {
+          return res.status(400).send({
+            message: "Customer email is required",
+          });
+        }
+
+        const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+        if (!emailPattern.test(customerEmail.trim())) {
+          return res.status(400).send({
+            message: "Invalid customer email",
+          });
+        }
+
+        const filter = {
+          _id: new ObjectId(id),
+          customerEmail: customerEmail.trim().toLowerCase(),
+          status: "Pending",
+        };
+
+        const existingBooking = await bookings.findOne(filter);
+
+        if (!existingBooking) {
+          return res.status(404).send({
+            message: "Pending booking not found",
+          });
+        }
+
+        const result = await bookings.updateOne(filter, {
+          $set: {
+            status: "Cancelled",
+            cancelledAt: new Date(),
+          },
+        });
+
+        if (result.modifiedCount === 0) {
+          return res.status(400).send({
+            message: "Booking could not be cancelled",
+          });
+        }
+
+        res.send({
+          message: "Booking cancelled successfully",
+        });
+      } catch (error) {
+        console.error(error);
+
+        res.status(500).send({
+          message: "Failed to cancel booking",
+        });
+      }
+    });
+
     app.post("/bookings", async (req, res) => {
       try {
         const newBooking = req.body;
