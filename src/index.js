@@ -234,6 +234,20 @@ async function run() {
           });
         }
 
+        const existingBooking = await bookings.findOne({
+          studioId,
+          bookingDate,
+          status: "Confirmed",
+          startTime: { $lt: endTime },
+          endTime: { $gt: startTime },
+        });
+
+        if (existingBooking) {
+          return res.status(409).send({
+            message: "This studio is already booked for this time",
+          });
+        }
+
         const booking = {
           studioId,
           customerEmail: customerEmail.trim().toLowerCase(),
