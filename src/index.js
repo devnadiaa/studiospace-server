@@ -50,6 +50,15 @@ app.get("/studios/:id", async (req, res) => {
   res.send(studio);
 });
 
+app.post("/studios", async (req, res) => {
+  const newStudio = req.body;
+
+  console.log("Adding new studio:", newStudio);
+
+  const result = await studiosCollection.insertOne(newStudio);
+  res.send(result);
+});
+
 
 } catch (error) {
 console.error(error);
