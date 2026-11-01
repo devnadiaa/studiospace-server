@@ -1,5 +1,5 @@
 import express from "express";
-import { MongoClient, ServerApiVersion, ObjectId } from "mongodb";
+import { MongoClient, ObjectId } from "mongodb";
 import cors from "cors";
 import "dotenv/config";
 import dns from "node:dns";
@@ -14,30 +14,34 @@ app.use(express.json());
 
 const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASS}@cluster0.bjjofhw.mongodb.net/`;
 
-const client = new MongoClient(uri, {
-  serverApi: {
-    version: ServerApiVersion.v1,
-    strict: true,
-    deprecationErrors: true,
-  },
-});
+const client = new MongoClient(uri);
 
 async function run() {
   try {
     await client.connect();
 
     const database = client.db("studiospaceDB");
-    const studiosCollection = database.collection("studios");
+    const studios = database.collection("studios");
 
     await client.db("admin").command({ ping: 1 });
 
     console.log("Pinged your deployment. You successfully connected to MongoDB!");
 
     app.get("/studios", async (req, res) => {
-      const cursor = studiosCollection.find({});
-      const studios = await cursor.toArray();
+      const cursor = studios.find({});
+      const allStudios = await cursor.toArray();
 
-      res.send(studios);
+      res.send(allStudios);
+    });
+
+    app.post("/studios", async (req, res) => {
+      const newStudio = req.body;
+
+      console.log("Adding new studio:", newStudio);
+
+      const result = await studios.insertOne(newStudio);
+
+      res.send(result);
     });
 
     app.get("/studios/:id", async (req, res) => {
@@ -48,28 +52,48 @@ async function run() {
       }
 
       const query = { _id: new ObjectId(id) };
-      const studio = await studiosCollection.findOne(query);
+      const result = await studios.findOne(query);
 
-      if (!studio) {
+      if (!result) {
         return res.status(404).send({ message: "Studio not found" });
       }
-
-      res.send(studio);
-    });
-
-    app.post("/studios", async (req, res) => {
-      const newStudio = req.body;
-
-      console.log("Adding new studio:", newStudio);
-
-      const result = await studiosCollection.insertOne(newStudio);
 
       res.send(result);
     });
 
-    app.put("/studios/:id", async (req, res) => {
+    app.patch("/studios/:id", async (req, res) => {
       const id = req.params.id;
       const { hostEmail, ...updatedStudio } = req.body;
+
+      if (!ObjectId.isValid(id)) {
+        return res.status(400).send({ message: "Invalid Studio ID" });
+      }
+
+      const filter = {
+        _id: new ObjectId(id),
+        hostEmail: hostEmail,
+      };
+
+      const existingStudio = await studios.findOne(filter);
+
+      if (!existingStudio) {
+        return res.status(403).send({
+          message: "You cannot update this studio",
+        });
+      }
+
+      const updatedDoc = {
+        $set: updatedStudio,
+      };
+
+      const result = await studios.updateOne(filter, updatedDoc);
+
+      res.send(result);
+    });
+
+    app.delete("/studios/:id", async (req, res) => {
+      const id = req.params.id;
+      const { hostEmail } = req.body;
 
       if (!ObjectId.isValid(id)) {
         return res.status(400).send({ message: "Invalid Studio ID" });
@@ -80,17 +104,15 @@ async function run() {
         hostEmail: hostEmail,
       };
 
-      const existingStudio = await studiosCollection.findOne(query);
+      const existingStudio = await studios.findOne(query);
 
       if (!existingStudio) {
         return res.status(403).send({
-          message: "You cannot update this studio",
+          message: "You cannot delete this studio",
         });
       }
 
-      const result = await studiosCollection.updateOne(query, {
-        $set: updatedStudio,
-      });
+      const result = await studios.deleteOne(query);
 
       res.send(result);
     });
