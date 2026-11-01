@@ -118,6 +118,41 @@ async function run() {
       res.send(result);
     });
 
+    app.get("/bookings", async (req, res) => {
+      try {
+        const email = req.query.email;
+
+        if (typeof email !== "string" || email.trim() === "") {
+          return res.status(400).send({
+            message: "Customer email is required",
+          });
+        }
+
+        const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+        if (!emailPattern.test(email.trim())) {
+          return res.status(400).send({
+            message: "Invalid customer email",
+          });
+        }
+
+        const query = {
+          customerEmail: email.trim().toLowerCase(),
+        };
+
+        const cursor = bookings.find(query).sort({ createdAt: -1 });
+        const customerBookings = await cursor.toArray();
+
+        res.send(customerBookings);
+      } catch (error) {
+        console.error(error);
+
+        res.status(500).send({
+          message: "Failed to fetch bookings",
+        });
+      }
+    });
+
     app.post("/bookings", async (req, res) => {
       try {
         const newBooking = req.body;
