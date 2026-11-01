@@ -22,6 +22,7 @@ async function run() {
 
     const database = client.db("studiospaceDB");
     const studios = database.collection("studios");
+    const bookings = database.collection("bookings");
 
     await client.db("admin").command({ ping: 1 });
 
@@ -115,6 +116,148 @@ async function run() {
       const result = await studios.deleteOne(query);
 
       res.send(result);
+    });
+
+    app.post("/bookings", async (req, res) => {
+      try {
+        const newBooking = req.body;
+
+        if (
+          newBooking === null ||
+          typeof newBooking !== "object" ||
+          Array.isArray(newBooking)
+        ) {
+          return res.status(400).send({
+            message: "Invalid booking information",
+          });
+        }
+
+        const {
+          studioId,
+          customerEmail,
+          bookingDate,
+          startTime,
+          endTime,
+          totalPrice,
+        } = newBooking;
+
+        if (
+          typeof studioId !== "string" ||
+          typeof customerEmail !== "string" ||
+          typeof bookingDate !== "string" ||
+          typeof startTime !== "string" ||
+          typeof endTime !== "string" ||
+          totalPrice === undefined
+        ) {
+          return res.status(400).send({
+            message: "Missing or invalid booking information",
+          });
+        }
+
+        if (!ObjectId.isValid(studioId)) {
+          return res.status(400).send({
+            message: "Invalid Studio ID",
+          });
+        }
+
+        const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+        if (!emailPattern.test(customerEmail.trim())) {
+          return res.status(400).send({
+            message: "Invalid customer email",
+          });
+        }
+
+        const studio = await studios.findOne({
+          _id: new ObjectId(studioId),
+        });
+
+        if (!studio) {
+          return res.status(404).send({
+            message: "Studio not found",
+          });
+        }
+
+        const datePattern = /^\d{4}-\d{2}-\d{2}$/;
+
+        if (!datePattern.test(bookingDate)) {
+          return res.status(400).send({
+            message: "Invalid booking date",
+          });
+        }
+
+        const parsedDate = new Date(`${bookingDate}T00:00:00.000Z`);
+
+        if (
+          Number.isNaN(parsedDate.getTime()) ||
+          parsedDate.toISOString().slice(0, 10) !== bookingDate
+        ) {
+          return res.status(400).send({
+            message: "Invalid booking date",
+          });
+        }
+
+        const today = new Intl.DateTimeFormat("en-CA", {
+          timeZone: "Asia/Dhaka",
+        }).format(new Date());
+
+        if (bookingDate < today) {
+          return res.status(400).send({
+            message: "Booking date cannot be in the past",
+          });
+        }
+
+        const timePattern = /^([01]\d|2[0-3]):[0-5]\d$/;
+
+        if (
+          !timePattern.test(startTime) ||
+          !timePattern.test(endTime)
+        ) {
+          return res.status(400).send({
+            message: "Invalid booking time",
+          });
+        }
+
+        if (startTime >= endTime) {
+          return res.status(400).send({
+            message: "End time must be after start time",
+          });
+        }
+
+        if (
+          typeof totalPrice !== "number" ||
+          !Number.isFinite(totalPrice) ||
+          totalPrice <= 0
+        ) {
+          return res.status(400).send({
+            message: "Total price must be a positive number",
+          });
+        }
+
+        const booking = {
+          studioId,
+          customerEmail: customerEmail.trim().toLowerCase(),
+          bookingDate,
+          startTime,
+          endTime,
+          totalPrice,
+          status: "Pending",
+          createdAt: new Date(),
+        };
+
+        const result = await bookings.insertOne(booking);
+
+        res.status(201).send({
+          message: "Booking created successfully",
+          insertedId: result.insertedId,
+        });
+      } catch (error) {
+        console.error(error);
+
+        res.status(500).send({
+          message: "Failed to create booking",
+        });
+      }
     });
   } catch (error) {
     console.error(error);
