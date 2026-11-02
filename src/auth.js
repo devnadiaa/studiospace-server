@@ -11,7 +11,8 @@ export const createAuth = (database, client) => {
     baseURL: process.env.BETTER_AUTH_URL,
 
     trustedOrigins: [
-      process.env.CLIENT_URL || "http://localhost:3000",
+      "http://localhost:3000",
+      ...(process.env.CLIENT_URL ? [process.env.CLIENT_URL] : []),
     ],
 
     emailAndPassword: {
