@@ -3,14 +3,20 @@ import { MongoClient, ObjectId } from "mongodb";
 import cors from "cors";
 import "dotenv/config";
 import dns from "node:dns";
+import { toNodeHandler } from "better-auth/node";
+import { createAuth } from "./auth.js";
 
 dns.setServers(["1.1.1.1", "8.8.8.8"]);
 
 const app = express();
 const port = process.env.PORT || 5000;
 
-app.use(cors());
-app.use(express.json());
+app.use(
+  cors({
+    origin: process.env.CLIENT_URL || "http://localhost:3000",
+    credentials: true,
+  })
+);
 
 const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASS}@cluster0.bjjofhw.mongodb.net/`;
 
@@ -24,9 +30,17 @@ async function run() {
     const studios = database.collection("studios");
     const bookings = database.collection("bookings");
 
+    const auth = createAuth(database, client);
+
+    app.all("/api/auth/*splat", toNodeHandler(auth));
+
+    app.use(express.json());
+
     await client.db("admin").command({ ping: 1 });
 
-    console.log("Pinged your deployment. You successfully connected to MongoDB!");
+    console.log(
+      "Pinged your deployment. You successfully connected to MongoDB!"
+    );
 
     app.get("/studios", async (req, res) => {
       const cursor = studios.find({});
@@ -184,23 +198,37 @@ async function run() {
         const filter = {
           _id: new ObjectId(id),
           customerEmail: customerEmail.trim().toLowerCase(),
-          status: "Pending",
         };
 
         const existingBooking = await bookings.findOne(filter);
 
         if (!existingBooking) {
           return res.status(404).send({
-            message: "Pending booking not found",
+            message: "Booking not found",
           });
         }
 
-        const result = await bookings.updateOne(filter, {
-          $set: {
-            status: "Cancelled",
-            cancelledAt: new Date(),
+        if (
+          typeof existingBooking.status !== "string" ||
+          existingBooking.status.toLowerCase() !== "pending"
+        ) {
+          return res.status(400).send({
+            message: "Only pending bookings can be cancelled",
+          });
+        }
+
+        const result = await bookings.updateOne(
+          {
+            ...filter,
+            status: existingBooking.status,
           },
-        });
+          {
+            $set: {
+              status: "Cancelled",
+              cancelledAt: new Date(),
+            },
+          }
+        );
 
         if (result.modifiedCount === 0) {
           return res.status(400).send({
@@ -223,6 +251,8 @@ async function run() {
     app.post("/bookings", async (req, res) => {
       try {
         const newBooking = req.body;
+
+        console.log("Booking Request:", newBooking);
 
         if (
           newBooking === null ||
