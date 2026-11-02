@@ -18,7 +18,7 @@ app.use(
   })
 );
 
-const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASS}@cluster0.bjjofhw.mongodb.net/`;
+const uri = `mongodb://${encodeURIComponent(process.env.DB_USER)}:${encodeURIComponent(process.env.DB_PASS)}@ac-9skxeq4-shard-00-00.bjjofhw.mongodb.net:27017,ac-9skxeq4-shard-00-01.bjjofhw.mongodb.net:27017,ac-9skxeq4-shard-00-02.bjjofhw.mongodb.net:27017/?ssl=true&replicaSet=atlas-kaeoio-shard-0&authSource=admin`;
 
 const client = new MongoClient(uri);
 
