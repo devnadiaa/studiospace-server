@@ -28,6 +28,7 @@ export const createAuth = (database, client) => {
         clientSecret: process.env.GOOGLE_CLIENT_SECRET,
         prompt: "select_account",
         scope: ["openid", "email", "profile"],
+        overrideUserInfoOnSignIn: true,
         mapProfileToUser: (profile) => ({
           image: profile.picture,
         }),
