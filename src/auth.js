@@ -1,5 +1,6 @@
 import { betterAuth } from "better-auth";
 import { mongodbAdapter } from "@better-auth/mongo-adapter";
+import { jwt } from "better-auth/plugins";
 
 export const createAuth = (database, client) => {
   return betterAuth({
@@ -19,7 +20,7 @@ export const createAuth = (database, client) => {
       enabled: true,
       minPasswordLength: 6,
       requireEmailVerification: false,
-      autoSignIn: true,
+      autoSignIn: false,
     },
 
     socialProviders: {
@@ -34,5 +35,19 @@ export const createAuth = (database, client) => {
         }),
       },
     },
+
+    session: {
+      cookieCache: {
+        enabled: true,
+        maxAge: 60,
+        strategy: "jwt",
+      },
+    },
+
+    plugins: [
+      jwt({
+        sessionCookieCache: true,
+      }),
+    ],
   });
 };

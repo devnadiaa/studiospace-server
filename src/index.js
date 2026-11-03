@@ -3,7 +3,10 @@ import { MongoClient, ObjectId } from "mongodb";
 import cors from "cors";
 import "dotenv/config";
 import dns from "node:dns";
-import { toNodeHandler } from "better-auth/node";
+import {
+  toNodeHandler,
+  fromNodeHeaders,
+} from "better-auth/node";
 import { createAuth } from "./auth.js";
 
 dns.setServers(["1.1.1.1", "8.8.8.8"]);
@@ -11,20 +14,31 @@ dns.setServers(["1.1.1.1", "8.8.8.8"]);
 const app = express();
 const port = process.env.PORT || 5000;
 
+const allowedOrigins = [
+  "http://localhost:3000",
+  ...(process.env.CLIENT_URL ? [process.env.CLIENT_URL] : []),
+];
+
 app.use(
   cors({
-    origin: process.env.CLIENT_URL || "http://localhost:3000",
+    origin: allowedOrigins,
     credentials: true,
+    methods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
   })
 );
 
-const uri = `mongodb://${encodeURIComponent(process.env.DB_USER)}:${encodeURIComponent(process.env.DB_PASS)}@ac-9skxeq4-shard-00-00.bjjofhw.mongodb.net:27017,ac-9skxeq4-shard-00-01.bjjofhw.mongodb.net:27017,ac-9skxeq4-shard-00-02.bjjofhw.mongodb.net:27017/?ssl=true&replicaSet=atlas-kaeoio-shard-0&authSource=admin`;
+const uri = `mongodb://${encodeURIComponent(
+  process.env.DB_USER
+)}:${encodeURIComponent(
+  process.env.DB_PASS
+)}@ac-9skxeq4-shard-00-00.bjjofhw.mongodb.net:27017,ac-9skxeq4-shard-00-01.bjjofhw.mongodb.net:27017,ac-9skxeq4-shard-00-02.bjjofhw.mongodb.net:27017/?ssl=true&replicaSet=atlas-kaeoio-shard-0&authSource=admin`;
 
 const client = new MongoClient(uri);
 
 let databasePromise = null;
 let studios;
 let bookings;
+let auth;
 let authHandler;
 
 const connectToDatabase = async () => {
@@ -37,8 +51,7 @@ const connectToDatabase = async () => {
       studios = database.collection("studios");
       bookings = database.collection("bookings");
 
-      const auth = createAuth(database, client);
-
+      auth = createAuth(database, client);
       authHandler = toNodeHandler(auth);
 
       await client.db("admin").command({ ping: 1 });
@@ -74,135 +87,326 @@ app.all("/api/auth/*splat", (req, res) => {
 
 app.use(express.json());
 
+const requireAuth = async (req, res, next) => {
+  try {
+    const session = await auth.api.getSession({
+      headers: fromNodeHeaders(req.headers),
+    });
+
+    if (!session?.user) {
+      return res.status(401).send({
+        message: "Please login to continue",
+      });
+    }
+
+    req.user = session.user;
+    req.session = session.session;
+
+    next();
+  } catch (error) {
+    next(error);
+  }
+};
+
+const getUserOwnershipQuery = (user) => {
+  return {
+    $or: [
+      { hostId: user.id },
+      { hostEmail: user.email.trim().toLowerCase() },
+    ],
+  };
+};
+
+const getCustomerBookingQuery = (user) => {
+  return {
+    $or: [
+      { customerId: user.id },
+      { customerEmail: user.email.trim().toLowerCase() },
+    ],
+  };
+};
+
+const getHostBookingQuery = async (user) => {
+  const ownedStudios = await studios
+    .find(getUserOwnershipQuery(user))
+    .project({ _id: 1 })
+    .toArray();
+
+  return ownedStudios.map((studio) => studio._id.toString());
+};
+
 app.get("/", (req, res) => {
   res.send("StudioSpace Server is Running!");
 });
 
-app.get("/studios", async (req, res) => {
-  const cursor = studios.find({});
-  const allStudios = await cursor.toArray();
+app.get("/studios", async (req, res, next) => {
+  try {
+    const allStudios = await studios.find({}).toArray();
 
-  res.send(allStudios);
+    res.send(allStudios);
+  } catch (error) {
+    next(error);
+  }
 });
 
-app.post("/studios", async (req, res) => {
-  const newStudio = req.body;
+app.get("/my-studios", requireAuth, async (req, res) => {
+  try {
+    const myStudios = await studios
+      .find(getUserOwnershipQuery(req.user))
+      .sort({ createdAt: -1 })
+      .toArray();
 
-  console.log("Adding new studio:", newStudio);
+    res.send(myStudios);
+  } catch (error) {
+    console.error(error);
 
-  const result = await studios.insertOne(newStudio);
+    res.status(500).send({
+      message: "Failed to fetch your studios",
+    });
+  }
+});
 
-  res.send(result);
+app.post("/studios", requireAuth, async (req, res) => {
+  try {
+    const {
+      hostId,
+      hostName,
+      hostEmail,
+      _id,
+      ...studioData
+    } = req.body;
+
+    const newStudio = {
+      ...studioData,
+      hostId: req.user.id,
+      hostName: req.user.name,
+      hostEmail: req.user.email.trim().toLowerCase(),
+      createdAt: new Date(),
+    };
+
+    const result = await studios.insertOne(newStudio);
+
+    res.status(201).send({
+      message: "Studio published successfully",
+      insertedId: result.insertedId,
+    });
+  } catch (error) {
+    console.error(error);
+
+    res.status(500).send({
+      message: "Failed to add studio",
+    });
+  }
 });
 
 app.get("/studios/:id", async (req, res) => {
-  const id = req.params.id;
-
-  if (!ObjectId.isValid(id)) {
-    return res.status(400).send({
-      message: "Invalid Studio ID",
-    });
-  }
-
-  const query = {
-    _id: new ObjectId(id),
-  };
-
-  const result = await studios.findOne(query);
-
-  if (!result) {
-    return res.status(404).send({
-      message: "Studio not found",
-    });
-  }
-
-  res.send(result);
-});
-
-app.patch("/studios/:id", async (req, res) => {
-  const id = req.params.id;
-  const { hostEmail, ...updatedStudio } = req.body;
-
-  if (!ObjectId.isValid(id)) {
-    return res.status(400).send({
-      message: "Invalid Studio ID",
-    });
-  }
-
-  const filter = {
-    _id: new ObjectId(id),
-    hostEmail: hostEmail,
-  };
-
-  const existingStudio = await studios.findOne(filter);
-
-  if (!existingStudio) {
-    return res.status(403).send({
-      message: "You cannot update this studio",
-    });
-  }
-
-  const updatedDoc = {
-    $set: updatedStudio,
-  };
-
-  const result = await studios.updateOne(filter, updatedDoc);
-
-  res.send(result);
-});
-
-app.delete("/studios/:id", async (req, res) => {
-  const id = req.params.id;
-  const { hostEmail } = req.body;
-
-  if (!ObjectId.isValid(id)) {
-    return res.status(400).send({
-      message: "Invalid Studio ID",
-    });
-  }
-
-  const query = {
-    _id: new ObjectId(id),
-    hostEmail: hostEmail,
-  };
-
-  const existingStudio = await studios.findOne(query);
-
-  if (!existingStudio) {
-    return res.status(403).send({
-      message: "You cannot delete this studio",
-    });
-  }
-
-  const result = await studios.deleteOne(query);
-
-  res.send(result);
-});
-
-app.get("/bookings", async (req, res) => {
   try {
-    const email = req.query.email;
+    const id = req.params.id;
 
-    if (typeof email !== "string" || email.trim() === "") {
+    if (!ObjectId.isValid(id)) {
       return res.status(400).send({
-        message: "Customer email is required",
+        message: "Invalid Studio ID",
       });
     }
 
-    const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    const result = await studios.findOne({
+      _id: new ObjectId(id),
+    });
 
-    if (!emailPattern.test(email.trim())) {
-      return res.status(400).send({
-        message: "Invalid customer email",
+    if (!result) {
+      return res.status(404).send({
+        message: "Studio not found",
       });
     }
 
-    const query = {
-      customerEmail: email.trim().toLowerCase(),
+    res.send(result);
+  } catch (error) {
+    console.error(error);
+
+    res.status(500).send({
+      message: "Failed to fetch studio",
+    });
+  }
+});
+
+app.patch("/studios/:id", requireAuth, async (req, res) => {
+  try {
+    const id = req.params.id;
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).send({
+        message: "Invalid Studio ID",
+      });
+    }
+
+    const {
+      hostEmail,
+      hostId,
+      hostName,
+      _id,
+      ...updatedStudio
+    } = req.body;
+
+    const filter = {
+      _id: new ObjectId(id),
+      ...getUserOwnershipQuery(req.user),
     };
 
-    const cursor = bookings.find(query).sort({ createdAt: -1 });
-    const customerBookings = await cursor.toArray();
+    const existingStudio = await studios.findOne(filter);
+
+    if (!existingStudio) {
+      return res.status(403).send({
+        message: "You cannot update this studio",
+      });
+    }
+
+    const result = await studios.updateOne(filter, {
+      $set: updatedStudio,
+    });
+
+    res.send(result);
+  } catch (error) {
+    console.error(error);
+
+    res.status(500).send({
+      message: "Failed to update studio",
+    });
+  }
+});
+
+app.delete("/studios/:id", requireAuth, async (req, res) => {
+  try {
+    const id = req.params.id;
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).send({
+        message: "Invalid Studio ID",
+      });
+    }
+
+    const filter = {
+      _id: new ObjectId(id),
+      ...getUserOwnershipQuery(req.user),
+    };
+
+    const existingStudio = await studios.findOne(filter);
+
+    if (!existingStudio) {
+      return res.status(403).send({
+        message: "You cannot delete this studio",
+      });
+    }
+
+    const result = await studios.deleteOne(filter);
+
+    res.send(result);
+  } catch (error) {
+    console.error(error);
+
+    res.status(500).send({
+      message: "Failed to delete studio",
+    });
+  }
+});
+
+// Customer: Check Studio Availability
+app.get("/bookings/availability", requireAuth, async (req, res) => {
+  try {
+    const { studioId, bookingDate, startTime, endTime } = req.query;
+
+    if (
+      typeof studioId !== "string" ||
+      typeof bookingDate !== "string" ||
+      typeof startTime !== "string" ||
+      typeof endTime !== "string"
+    ) {
+      return res.status(400).send({
+        message: "Missing or invalid booking information",
+      });
+    }
+
+    if (!ObjectId.isValid(studioId)) {
+      return res.status(400).send({
+        message: "Invalid Studio ID",
+      });
+    }
+
+    const studio = await studios.findOne({
+      _id: new ObjectId(studioId),
+    });
+
+    if (!studio) {
+      return res.status(404).send({
+        message: "Studio not found",
+      });
+    }
+
+    const datePattern = /^\d{4}-\d{2}-\d{2}$/;
+    const timePattern = /^([01]\d|2[0-3]):[0-5]\d$/;
+
+    if (!datePattern.test(bookingDate)) {
+      return res.status(400).send({
+        message: "Invalid booking date",
+      });
+    }
+
+    const parsedDate = new Date(`${bookingDate}T00:00:00.000Z`);
+
+    if (
+      Number.isNaN(parsedDate.getTime()) ||
+      parsedDate.toISOString().slice(0, 10) !== bookingDate
+    ) {
+      return res.status(400).send({
+        message: "Invalid booking date",
+      });
+    }
+
+    if (
+      !timePattern.test(startTime) ||
+      !timePattern.test(endTime) ||
+      startTime >= endTime
+    ) {
+      return res.status(400).send({
+        message: "Invalid booking time",
+      });
+    }
+
+    const existingBooking = await bookings.findOne({
+      studioId,
+      bookingDate,
+      status: "Confirmed",
+      startTime: { $lt: endTime },
+      endTime: { $gt: startTime },
+    });
+
+    if (existingBooking) {
+      return res.status(200).send({
+        available: false,
+        message:
+          "This time slot is already booked. Please select another time.",
+      });
+    }
+
+    return res.status(200).send({
+      available: true,
+      message: "This time slot is available.",
+    });
+  } catch (error) {
+    console.error("Availability check error:", error);
+
+    return res.status(500).send({
+      message: "Unable to check studio availability",
+    });
+  }
+});
+
+// Customer: View Own Bookings
+app.get("/bookings", requireAuth, async (req, res) => {
+  try {
+    const customerBookings = await bookings
+      .find(getCustomerBookingQuery(req.user))
+      .sort({ createdAt: -1 })
+      .toArray();
 
     res.send(customerBookings);
   } catch (error) {
@@ -214,10 +418,36 @@ app.get("/bookings", async (req, res) => {
   }
 });
 
-app.patch("/bookings/:id/cancel", async (req, res) => {
+// Host: View Bookings for Own Studios
+app.get("/host-bookings", requireAuth, async (req, res) => {
+  try {
+    const studioIds = await getHostBookingQuery(req.user);
+
+    if (studioIds.length === 0) {
+      return res.send([]);
+    }
+
+    const hostBookings = await bookings
+      .find({
+        studioId: { $in: studioIds },
+      })
+      .sort({ createdAt: -1 })
+      .toArray();
+
+    res.send(hostBookings);
+  } catch (error) {
+    console.error(error);
+
+    res.status(500).send({
+      message: "Failed to fetch host bookings",
+    });
+  }
+});
+
+// Host: Confirm Booking
+app.patch("/bookings/:id/confirm", requireAuth, async (req, res) => {
   try {
     const id = req.params.id;
-    const { customerEmail } = req.body;
 
     if (!ObjectId.isValid(id)) {
       return res.status(400).send({
@@ -225,26 +455,190 @@ app.patch("/bookings/:id/cancel", async (req, res) => {
       });
     }
 
-    if (
-      typeof customerEmail !== "string" ||
-      customerEmail.trim() === ""
-    ) {
-      return res.status(400).send({
-        message: "Customer email is required",
+    const bookingId = new ObjectId(id);
+
+    const existingBooking = await bookings.findOne({
+      _id: bookingId,
+    });
+
+    if (!existingBooking) {
+      return res.status(404).send({
+        message: "Booking not found",
       });
     }
 
-    const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    const studioId = String(existingBooking.studioId || "");
 
-    if (!emailPattern.test(customerEmail.trim())) {
+    if (!ObjectId.isValid(studioId)) {
       return res.status(400).send({
-        message: "Invalid customer email",
+        message: "Invalid Studio ID",
+      });
+    }
+
+    const studio = await studios.findOne({
+      _id: new ObjectId(studioId),
+      ...getUserOwnershipQuery(req.user),
+    });
+
+    if (!studio) {
+      return res.status(403).send({
+        message: "You cannot confirm this booking",
+      });
+    }
+
+    if (
+      typeof existingBooking.status !== "string" ||
+      existingBooking.status.toLowerCase() !== "pending"
+    ) {
+      return res.status(400).send({
+        message: "Only pending bookings can be confirmed",
+      });
+    }
+
+    const overlappingBooking = await bookings.findOne({
+      _id: { $ne: bookingId },
+      studioId,
+      bookingDate: existingBooking.bookingDate,
+      status: "Confirmed",
+      startTime: { $lt: existingBooking.endTime },
+      endTime: { $gt: existingBooking.startTime },
+    });
+
+    if (overlappingBooking) {
+      return res.status(409).send({
+        message: "This studio is already booked for this time",
+      });
+    }
+
+    const result = await bookings.updateOne(
+      {
+        _id: bookingId,
+        status: existingBooking.status,
+      },
+      {
+        $set: {
+          status: "Confirmed",
+          confirmedAt: new Date(),
+          confirmedBy: req.user.id,
+        },
+      }
+    );
+
+    if (result.modifiedCount === 0) {
+      return res.status(409).send({
+        message: "Booking status has already changed",
+      });
+    }
+
+    res.send({
+      message: "Booking confirmed successfully",
+    });
+  } catch (error) {
+    console.error(error);
+
+    res.status(500).send({
+      message: "Failed to confirm booking",
+    });
+  }
+});
+
+// Host: Reject Booking
+app.patch("/bookings/:id/reject", requireAuth, async (req, res) => {
+  try {
+    const id = req.params.id;
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).send({
+        message: "Invalid Booking ID",
+      });
+    }
+
+    const bookingId = new ObjectId(id);
+
+    const existingBooking = await bookings.findOne({
+      _id: bookingId,
+    });
+
+    if (!existingBooking) {
+      return res.status(404).send({
+        message: "Booking not found",
+      });
+    }
+
+    const studioId = String(existingBooking.studioId || "");
+
+    if (!ObjectId.isValid(studioId)) {
+      return res.status(400).send({
+        message: "Invalid Studio ID",
+      });
+    }
+
+    const studio = await studios.findOne({
+      _id: new ObjectId(studioId),
+      ...getUserOwnershipQuery(req.user),
+    });
+
+    if (!studio) {
+      return res.status(403).send({
+        message: "You cannot reject this booking",
+      });
+    }
+
+    if (
+      typeof existingBooking.status !== "string" ||
+      existingBooking.status.toLowerCase() !== "pending"
+    ) {
+      return res.status(400).send({
+        message: "Only pending bookings can be rejected",
+      });
+    }
+
+    const result = await bookings.updateOne(
+      {
+        _id: bookingId,
+        status: existingBooking.status,
+      },
+      {
+        $set: {
+          status: "Rejected",
+          rejectedAt: new Date(),
+          rejectedBy: req.user.id,
+        },
+      }
+    );
+
+    if (result.modifiedCount === 0) {
+      return res.status(409).send({
+        message: "Booking status has already changed",
+      });
+    }
+
+    res.send({
+      message: "Booking rejected successfully",
+    });
+  } catch (error) {
+    console.error(error);
+
+    res.status(500).send({
+      message: "Failed to reject booking",
+    });
+  }
+});
+
+// Customer: Cancel Own Pending Booking
+app.patch("/bookings/:id/cancel", requireAuth, async (req, res) => {
+  try {
+    const id = req.params.id;
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).send({
+        message: "Invalid Booking ID",
       });
     }
 
     const filter = {
       _id: new ObjectId(id),
-      customerEmail: customerEmail.trim().toLowerCase(),
+      ...getCustomerBookingQuery(req.user),
     };
 
     const existingBooking = await bookings.findOne(filter);
@@ -295,11 +689,10 @@ app.patch("/bookings/:id/cancel", async (req, res) => {
   }
 });
 
-app.post("/bookings", async (req, res) => {
+// Customer: Create Booking
+app.post("/bookings", requireAuth, async (req, res) => {
   try {
     const newBooking = req.body;
-
-    console.log("Booking Request:", newBooking);
 
     if (
       newBooking === null ||
@@ -313,7 +706,6 @@ app.post("/bookings", async (req, res) => {
 
     const {
       studioId,
-      customerEmail,
       bookingDate,
       startTime,
       endTime,
@@ -322,7 +714,6 @@ app.post("/bookings", async (req, res) => {
 
     if (
       typeof studioId !== "string" ||
-      typeof customerEmail !== "string" ||
       typeof bookingDate !== "string" ||
       typeof startTime !== "string" ||
       typeof endTime !== "string" ||
@@ -336,14 +727,6 @@ app.post("/bookings", async (req, res) => {
     if (!ObjectId.isValid(studioId)) {
       return res.status(400).send({
         message: "Invalid Studio ID",
-      });
-    }
-
-    const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-
-    if (!emailPattern.test(customerEmail.trim())) {
-      return res.status(400).send({
-        message: "Invalid customer email",
       });
     }
 
@@ -429,7 +812,9 @@ app.post("/bookings", async (req, res) => {
 
     const booking = {
       studioId,
-      customerEmail: customerEmail.trim().toLowerCase(),
+      customerId: req.user.id,
+      customerEmail: req.user.email.trim().toLowerCase(),
+      customerName: req.user.name,
       bookingDate,
       startTime,
       endTime,
