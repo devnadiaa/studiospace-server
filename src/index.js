@@ -625,6 +625,89 @@ app.patch("/bookings/:id/reject", requireAuth, async (req, res) => {
   }
 });
 
+// Host: Complete Booking
+app.patch("/bookings/:id/complete", requireAuth, async (req, res) => {
+  try {
+    const id = req.params.id;
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).send({
+        message: "Invalid Booking ID",
+      });
+    }
+
+    const bookingId = new ObjectId(id);
+
+    const existingBooking = await bookings.findOne({
+      _id: bookingId,
+    });
+
+    if (!existingBooking) {
+      return res.status(404).send({
+        message: "Booking not found",
+      });
+    }
+
+    const studioId = String(existingBooking.studioId || "");
+
+    if (!ObjectId.isValid(studioId)) {
+      return res.status(400).send({
+        message: "Invalid Studio ID",
+      });
+    }
+
+    const studio = await studios.findOne({
+      _id: new ObjectId(studioId),
+      ...getUserOwnershipQuery(req.user),
+    });
+
+    if (!studio) {
+      return res.status(403).send({
+        message: "You cannot complete this booking",
+      });
+    }
+
+    if (
+      typeof existingBooking.status !== "string" ||
+      existingBooking.status.toLowerCase() !== "confirmed"
+    ) {
+      return res.status(400).send({
+        message: "Only confirmed bookings can be completed",
+      });
+    }
+
+    const result = await bookings.updateOne(
+      {
+        _id: bookingId,
+        status: existingBooking.status,
+      },
+      {
+        $set: {
+          status: "Completed",
+          completedAt: new Date(),
+          completedBy: req.user.id,
+        },
+      }
+    );
+
+    if (result.modifiedCount === 0) {
+      return res.status(409).send({
+        message: "Booking status has already changed",
+      });
+    }
+
+    res.send({
+      message: "Booking completed successfully",
+    });
+  } catch (error) {
+    console.error(error);
+
+    res.status(500).send({
+      message: "Failed to complete booking",
+    });
+  }
+});
+
 // Customer: Cancel Own Pending Booking
 app.patch("/bookings/:id/cancel", requireAuth, async (req, res) => {
   try {
