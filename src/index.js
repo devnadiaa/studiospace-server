@@ -38,6 +38,7 @@ const client = new MongoClient(uri);
 let databasePromise = null;
 let studios;
 let bookings;
+let reviews;
 let auth;
 let authHandler;
 
@@ -50,6 +51,7 @@ const connectToDatabase = async () => {
 
       studios = database.collection("studios");
       bookings = database.collection("bookings");
+      reviews = database.collection("reviews");
 
       auth = createAuth(database, client);
       authHandler = toNodeHandler(auth);
@@ -135,6 +137,34 @@ const getHostBookingQuery = async (user) => {
   return ownedStudios.map((studio) => studio._id.toString());
 };
 
+const getStudioRating = async (studioId) => {
+  const result = await reviews
+    .aggregate([
+      {
+        $match: {
+          studioId,
+        },
+      },
+      {
+        $group: {
+          _id: "$studioId",
+          averageRating: { $avg: "$rating" },
+          reviewCount: { $sum: 1 },
+        },
+      },
+    ])
+    .toArray();
+
+  return {
+    rating: result.length > 0
+      ? Number(result[0].averageRating.toFixed(1))
+      : 0,
+    reviewCount: result.length > 0
+      ? result[0].reviewCount
+      : 0,
+  };
+};
+
 app.get("/", (req, res) => {
   res.send("StudioSpace Server is Running!");
 });
@@ -143,7 +173,21 @@ app.get("/studios", async (req, res, next) => {
   try {
     const allStudios = await studios.find({}).toArray();
 
-    res.send(allStudios);
+    const studiosWithRatings = await Promise.all(
+      allStudios.map(async (studio) => {
+        const { rating, reviewCount } = await getStudioRating(
+          studio._id.toString()
+        );
+
+        return {
+          ...studio,
+          rating,
+          reviewCount,
+        };
+      })
+    );
+
+    res.send(studiosWithRatings);
   } catch (error) {
     next(error);
   }
@@ -173,6 +217,8 @@ app.post("/studios", requireAuth, async (req, res) => {
       hostName,
       hostEmail,
       _id,
+      rating,
+      reviewCount,
       ...studioData
     } = req.body;
 
@@ -219,12 +265,157 @@ app.get("/studios/:id", async (req, res) => {
       });
     }
 
-    res.send(result);
+    const { rating, reviewCount } = await getStudioRating(id);
+
+    res.send({
+      ...result,
+      rating,
+      reviewCount,
+    });
   } catch (error) {
     console.error(error);
 
     res.status(500).send({
       message: "Failed to fetch studio",
+    });
+  }
+});
+
+app.get("/studios/:id/reviews", async (req, res) => {
+  try {
+    const id = req.params.id;
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).send({
+        message: "Invalid Studio ID",
+      });
+    }
+
+    const studio = await studios.findOne({
+      _id: new ObjectId(id),
+    });
+
+    if (!studio) {
+      return res.status(404).send({
+        message: "Studio not found",
+      });
+    }
+
+    const studioReviews = await reviews
+      .find({ studioId: id })
+      .sort({ createdAt: -1 })
+      .toArray();
+
+    res.send(studioReviews);
+  } catch (error) {
+    console.error(error);
+
+    res.status(500).send({
+      message: "Failed to fetch reviews",
+    });
+  }
+});
+
+app.post("/studios/:id/reviews", requireAuth, async (req, res) => {
+  try {
+    const id = req.params.id;
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).send({
+        message: "Invalid Studio ID",
+      });
+    }
+
+    const studio = await studios.findOne({
+      _id: new ObjectId(id),
+    });
+
+    if (!studio) {
+      return res.status(404).send({
+        message: "Studio not found",
+      });
+    }
+
+    const { bookingId, rating, comment } = req.body;
+
+    if (
+      typeof bookingId !== "string" ||
+      !ObjectId.isValid(bookingId)
+    ) {
+      return res.status(400).send({
+        message: "Invalid Booking ID",
+      });
+    }
+
+    if (
+      typeof rating !== "number" ||
+      !Number.isInteger(rating) ||
+      rating < 1 ||
+      rating > 5
+    ) {
+      return res.status(400).send({
+        message: "Rating must be between 1 and 5",
+      });
+    }
+
+    if (
+      typeof comment !== "string" ||
+      comment.trim().length < 10 ||
+      comment.trim().length > 1000
+    ) {
+      return res.status(400).send({
+        message: "Review must be between 10 and 1000 characters",
+      });
+    }
+
+    const booking = await bookings.findOne({
+      _id: new ObjectId(bookingId),
+      ...getCustomerBookingQuery(req.user),
+      studioId: id,
+    });
+
+    if (!booking) {
+      return res.status(403).send({
+        message: "You can only review your own booking",
+      });
+    }
+
+    if (
+      typeof booking.status !== "string" ||
+      booking.status.toLowerCase() !== "completed"
+    ) {
+      return res.status(400).send({
+        message: "You can only review completed bookings",
+      });
+    }
+
+    const newReview = {
+      studioId: id,
+      bookingId,
+      userId: req.user.id,
+      userName: req.user.name,
+      userEmail: req.user.email.trim().toLowerCase(),
+      rating,
+      comment: comment.trim(),
+      createdAt: new Date(),
+    };
+
+    const result = await reviews.insertOne(newReview);
+
+    const { rating: averageRating, reviewCount } =
+      await getStudioRating(id);
+
+    res.status(201).send({
+      message: "Review submitted successfully",
+      insertedId: result.insertedId,
+      rating: averageRating,
+      reviewCount,
+    });
+  } catch (error) {
+    console.error(error);
+
+    res.status(500).send({
+      message: "Failed to submit review",
     });
   }
 });
@@ -244,6 +435,8 @@ app.patch("/studios/:id", requireAuth, async (req, res) => {
       hostId,
       hostName,
       _id,
+      rating,
+      reviewCount,
       ...updatedStudio
     } = req.body;
 
@@ -309,7 +502,6 @@ app.delete("/studios/:id", requireAuth, async (req, res) => {
   }
 });
 
-// Customer: Check Studio Availability
 app.get("/bookings/availability", requireAuth, async (req, res) => {
   try {
     const { studioId, bookingDate, startTime, endTime } = req.query;
@@ -400,7 +592,6 @@ app.get("/bookings/availability", requireAuth, async (req, res) => {
   }
 });
 
-// Customer: View Own Bookings
 app.get("/bookings", requireAuth, async (req, res) => {
   try {
     const customerBookings = await bookings
@@ -418,7 +609,6 @@ app.get("/bookings", requireAuth, async (req, res) => {
   }
 });
 
-// Host: View Bookings for Own Studios
 app.get("/host-bookings", requireAuth, async (req, res) => {
   try {
     const studioIds = await getHostBookingQuery(req.user);
@@ -444,7 +634,6 @@ app.get("/host-bookings", requireAuth, async (req, res) => {
   }
 });
 
-// Host: Confirm Booking
 app.patch("/bookings/:id/confirm", requireAuth, async (req, res) => {
   try {
     const id = req.params.id;
@@ -542,7 +731,6 @@ app.patch("/bookings/:id/confirm", requireAuth, async (req, res) => {
   }
 });
 
-// Host: Reject Booking
 app.patch("/bookings/:id/reject", requireAuth, async (req, res) => {
   try {
     const id = req.params.id;
@@ -625,7 +813,6 @@ app.patch("/bookings/:id/reject", requireAuth, async (req, res) => {
   }
 });
 
-// Host: Complete Booking
 app.patch("/bookings/:id/complete", requireAuth, async (req, res) => {
   try {
     const id = req.params.id;
@@ -708,7 +895,6 @@ app.patch("/bookings/:id/complete", requireAuth, async (req, res) => {
   }
 });
 
-// Customer: Cancel Own Pending Booking
 app.patch("/bookings/:id/cancel", requireAuth, async (req, res) => {
   try {
     const id = req.params.id;
@@ -772,7 +958,6 @@ app.patch("/bookings/:id/cancel", requireAuth, async (req, res) => {
   }
 });
 
-// Customer: Create Booking
 app.post("/bookings", requireAuth, async (req, res) => {
   try {
     const newBooking = req.body;
@@ -792,15 +977,13 @@ app.post("/bookings", requireAuth, async (req, res) => {
       bookingDate,
       startTime,
       endTime,
-      totalPrice,
     } = newBooking;
 
     if (
       typeof studioId !== "string" ||
       typeof bookingDate !== "string" ||
       typeof startTime !== "string" ||
-      typeof endTime !== "string" ||
-      totalPrice === undefined
+      typeof endTime !== "string"
     ) {
       return res.status(400).send({
         message: "Missing or invalid booking information",
@@ -820,6 +1003,17 @@ app.post("/bookings", requireAuth, async (req, res) => {
     if (!studio) {
       return res.status(404).send({
         message: "Studio not found",
+      });
+    }
+
+    const hourlyRate = Number(studio.hourlyRate);
+
+    if (
+      !Number.isFinite(hourlyRate) ||
+      hourlyRate <= 0
+    ) {
+      return res.status(400).send({
+        message: "Invalid studio hourly rate",
       });
     }
 
@@ -863,21 +1057,30 @@ app.post("/bookings", requireAuth, async (req, res) => {
       });
     }
 
-    if (startTime >= endTime) {
+    const [startHour, startMinute] = startTime
+      .split(":")
+      .map(Number);
+
+    const [endHour, endMinute] = endTime
+      .split(":")
+      .map(Number);
+
+    const startMinutes = startHour * 60 + startMinute;
+    const endMinutes = endHour * 60 + endMinute;
+
+    const durationHours = (endMinutes - startMinutes) / 60;
+
+    if (
+      !Number.isInteger(durationHours) ||
+      durationHours < 1 ||
+      durationHours > 6
+    ) {
       return res.status(400).send({
-        message: "End time must be after start time",
+        message: "Booking duration must be between 1 and 6 hours",
       });
     }
 
-    if (
-      typeof totalPrice !== "number" ||
-      !Number.isFinite(totalPrice) ||
-      totalPrice <= 0
-    ) {
-      return res.status(400).send({
-        message: "Total price must be a positive number",
-      });
-    }
+    const totalPrice = hourlyRate * durationHours;
 
     const existingBooking = await bookings.findOne({
       studioId,
