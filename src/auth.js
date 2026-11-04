@@ -11,6 +11,13 @@ export const createAuth = (database, client) => {
     secret: process.env.BETTER_AUTH_SECRET,
     baseURL: process.env.BETTER_AUTH_URL,
 
+    advanced: {
+      defaultCookieAttributes: {
+        sameSite: "none",
+        secure: true,
+      },
+    },
+
     trustedOrigins: [
       "http://localhost:3000",
       ...(process.env.CLIENT_URL ? [process.env.CLIENT_URL] : []),
